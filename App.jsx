@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 import { QRCodeSVG } from 'qrcode.react';
 import quizData from './quiz.json';
@@ -12,12 +12,6 @@ const getSession = () => JSON.parse(sessionStorage.getItem('quiz_session')) || {
 const setSession = (data) => sessionStorage.setItem('quiz_session', JSON.stringify({ ...getSession(), ...data }));
 
 // --- ICONS & ASSETS ---
-const Shapes = {
-    0: (className) => <div className={`w-full h-full bg-red-500 clip-triangle ${className}`}>▲</div>,
-    1: (className) => <div className={`w-full h-full bg-blue-500 ${className}`}>●</div>, // Circle
-    2: (className) => <div className={`w-full h-full bg-yellow-500 ${className}`}>■</div>, // Square
-    3: (className) => <div className={`w-full h-full bg-green-500 ${className}`}>★</div> // Star
-};
 const Colors = ['bg-red-500', 'bg-blue-500', 'bg-yellow-500', 'bg-green-500'];
 
 export default function App() {
@@ -25,11 +19,12 @@ export default function App() {
     const [view, setView] = useState('LANDING');
     const [role, setRole] = useState(null);
     const [connectionError, setConnectionError] = useState(false);
+    const [isLoading, setIsLoading] = useState(false); // Loading state
 
     // Shared State
     const [roomCode, setRoomCode] = useState('');
     const [playerName, setPlayerName] = useState('');
-    const [myId, setMyId] = useState(null); // Stable Player ID
+    const [myId, setMyId] = useState(null);
 
     // Host State
     const [players, setPlayers] = useState([]);
@@ -45,9 +40,15 @@ export default function App() {
     const [timer, setTimer] = useState(0);
     const [myAnswer, setMyAnswer] = useState(null);
 
-    // --- INITIALIZATION & RECONNECT ---
+    // Helper: Vibrate on mobile
+    const vibrate = (pattern = [50]) => {
+        if (navigator.vibrate) {
+            navigator.vibrate(pattern);
+        }
+    };
+
+    // --- INITIALIZATION ---
     useEffect(() => {
-        // 1. Get or Create Stable ID
         let storedId = localStorage.getItem('quiz_player_id');
         if (!storedId) {
             storedId = generateId();
@@ -55,18 +56,15 @@ export default function App() {
         }
         setMyId(storedId);
 
-        // 2. Check URL for PIN
         const params = new URLSearchParams(window.location.search);
         const urlPin = params.get('pin');
         if (urlPin) setRoomCode(urlPin);
 
-        // 3. Connect Socket
         const newSocket = io(BACKEND_URL);
         setSocket(newSocket);
 
         newSocket.on('connect', () => {
             setConnectionError(false);
-            // 4. Attempt Reconnect
             const session = getSession();
             if (session.roomCode && session.role) {
                 newSocket.emit('check_session', {
@@ -85,21 +83,21 @@ export default function App() {
     useEffect(() => {
         if (!socket) return;
 
-        // --- SESSION RESTORE ---
         socket.on('session_restored', (data) => {
             console.log('Session Restored:', data);
             setRole(data.role);
             setRoomCode(data.roomCode);
-            setGameStatus(data.gameState); // Mostly for host
+            setGameStatus(data.gameState);
+            setLeaderboard(data.leaderboard); // IMPORTANT for final screen
 
             if (data.role === 'HOST') {
                 setView(data.gameState === 'LOBBY' ? 'HOST_LOBBY' : 'HOST_GAME');
                 setPlayers(data.players || []);
                 if (data.gameState === 'QUESTION') {
                     setHostQuestion({
-                        question: data.question.text,
+                        question: data.question.title /* fix from server? sent text */ || data.question.text,
                         timeLimit: data.question.timeLimit,
-                        questionIndex: 1, // Approximation for restore
+                        questionIndex: 1,
                         totalQuestions: 10,
                         options: data.question.options
                     });
@@ -110,9 +108,11 @@ export default function App() {
                 if (data.gameState === 'QUESTION' || data.gameState === 'ANSWERING') {
                     setPlayerGameState('ANSWERING');
                     setPlayerQuestion(data.currentQuestion);
-                    setTimer(data.currentQuestion.timeLimit); // Should be calc'd
+                    setTimer(data.currentQuestion.timeLimit);
                 } else if (data.gameState === 'LOBBY') {
                     setPlayerGameState('WAITING');
+                } else if (data.gameState === 'OVER') {
+                    setPlayerGameState('OVER');
                 }
             }
         });
@@ -120,6 +120,29 @@ export default function App() {
         socket.on('session_invalid', () => {
             sessionStorage.removeItem('quiz_session');
             setView('LANDING');
+        });
+
+        // --- GLOBAL EVENTS ---
+        socket.on('game_reset', () => {
+            setGameStatus('LOBBY');
+            setLeaderboard([]);
+            setPlayers([]); // Wait for join events or keep them? Server keeps them.
+            // Actually, server keeps them, so we shouldn't wipe local players if we are host, 
+            // but `player_joined` usually updates it. 
+            // Let's rely on server state.
+            // For Player:
+            setPlayerGameState('WAITING');
+            setPlayerQuestion(null);
+            setPlayerResult(null);
+            setMyAnswer(null);
+            // For Host:
+            setView('HOST_LOBBY');
+        });
+
+        socket.on('room_closed', () => {
+            alert("The host has ended the session.");
+            sessionStorage.removeItem('quiz_session');
+            window.location.href = '/';
         });
 
         // --- HOST LISTENERS ---
@@ -136,9 +159,24 @@ export default function App() {
             setLeaderboard(data);
             setGameStatus('LEADERBOARD');
         });
-        socket.on('game_over', (finalLeaderboard) => {
-            setLeaderboard(finalLeaderboard);
-            setGameStatus('OVER');
+        socket.on('game_over', (data) => {
+            // Handle both array (old format) and object (new format)
+            if (Array.isArray(data)) {
+                // Legacy format
+                setLeaderboard(data);
+                setGameStatus('OVER');
+            } else {
+                // New personalized format
+                setLeaderboard(data.leaderboard);
+                setGameStatus('OVER');
+
+                // Store player's personal rank if provided
+                if (data.playerRank) {
+                    sessionStorage.setItem('playerRank', data.playerRank);
+                    sessionStorage.setItem('playerScore', data.playerScore);
+                    sessionStorage.setItem('totalPlayers', data.totalPlayers);
+                }
+            }
         });
 
         // --- PLAYER LISTENERS ---
@@ -157,10 +195,14 @@ export default function App() {
 
     }, [socket, players.length]);
 
-    // Timer Effect
     useEffect(() => {
         if (timer > 0 && playerGameState === 'ANSWERING') {
-            const interval = setInterval(() => setTimer(t => t - 1), 1000);
+            const interval = setInterval(() => {
+                setTimer(t => {
+                    if (t === 5) vibrate([200]); // Warning vibration at 5 seconds
+                    return t - 1;
+                });
+            }, 1000);
             return () => clearInterval(interval);
         }
     }, [timer, playerGameState]);
@@ -169,51 +211,61 @@ export default function App() {
     // --- ACTIONS ---
 
     const handleCreateQuiz = () => {
+        setIsLoading(true);
+        vibrate([30]);
         socket.emit('create_room', quizData, (response) => {
             setRoomCode(response.roomCode);
             setRole('HOST');
             setView('HOST_LOBBY');
             setPlayers([]);
-            // Save Session
             setSession({ role: 'HOST', roomCode: response.roomCode, hostToken: response.hostToken });
+            setIsLoading(false);
         });
     };
 
     const handleStartGame = () => {
-        if (socket) socket.emit('start_game', roomCode);
+        if (socket) {
+            vibrate([50, 50, 50]);
+            socket.emit('start_game', roomCode);
+        }
     };
-
     const handleNextQuestion = () => socket.emit('next_question', roomCode);
     const handleShowLeaderboard = () => socket.emit('show_leaderboard', roomCode);
 
+    const handleResetGame = () => {
+        socket.emit('reset_game', roomCode);
+    };
+
+    const handleCloseRoom = () => {
+        if (confirm("Are you sure you want to close the room for everyone?")) {
+            socket.emit('close_room', roomCode);
+        }
+    };
+
     const handleJoinRoom = () => {
         if (!roomCode || !playerName) return alert("Please enter code and name");
-
-        socket.emit('join_room', {
-            roomCode: roomCode.toUpperCase(),
-            playerName,
-            playerId: myId
-        }, (response) => {
+        setIsLoading(true);
+        vibrate([30]);
+        socket.emit('join_room', { roomCode: roomCode.toUpperCase(), playerName, playerId: myId }, (response) => {
             if (response.error) {
                 alert(response.error);
+                vibrate([100, 50, 100]);
             } else {
                 setRole('PLAYER');
                 setView('PLAYER_GAME');
-                // Save Session
                 setSession({ role: 'PLAYER', roomCode: roomCode.toUpperCase() });
+                vibrate([50]);
             }
+            setIsLoading(false);
         });
     };
 
     const handleSubmitAnswer = (index) => {
         if (playerGameState !== 'ANSWERING') return;
+        if (myAnswer !== null) return; // Prevent re-answering
+        vibrate([100]); // Strong vibration on answer
         setMyAnswer(index);
-        socket.emit('submit_answer', {
-            roomCode,
-            answerIndex: index,
-            timeRemaining: timer,
-            playerId: myId
-        });
+        socket.emit('submit_answer', { roomCode, answerIndex: index, timeRemaining: timer, playerId: myId });
     };
 
 
@@ -242,8 +294,9 @@ export default function App() {
                             value={playerName}
                             onChange={e => setPlayerName(e.target.value)}
                         />
-                        <button onClick={handleJoinRoom} className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-black py-4 rounded-xl shadow-lg transform transition active:scale-95 text-xl">
-                            JOIN GAME
+                        <button onClick={handleJoinRoom} disabled={isLoading} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 disabled:cursor-not-allowed text-white font-black py-4 rounded-xl shadow-lg transform transition active:scale-95 text-xl flex items-center justify-center gap-2">
+                            {isLoading && <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>}
+                            {isLoading ? 'JOINING...' : 'JOIN GAME'}
                         </button>
                     </div>
                     <div className="border-t border-gray-100 pt-6 text-center">
@@ -258,10 +311,8 @@ export default function App() {
 
     if (view === 'HOST_LOBBY') {
         const joinUrl = `${window.location.origin}?pin=${roomCode}`;
-
         return (
             <div className="min-h-screen bg-slate-900 text-white p-6 flex flex-col font-sans">
-                {/* Header */}
                 <div className="flex flex-col md:flex-row justify-between items-center bg-slate-800 p-6 rounded-2xl shadow-xl mb-8 border border-slate-700">
                     <div>
                         <p className="text-slate-400 font-bold uppercase tracking-widest text-sm mb-2">Join at {window.location.hostname}</p>
@@ -277,7 +328,6 @@ export default function App() {
                     </div>
                 </div>
 
-                {/* Player Grid */}
                 <div className="flex-1">
                     <div className="flex justify-between items-center mb-6">
                         <h2 className="text-3xl font-black flex items-center gap-3">
@@ -285,7 +335,6 @@ export default function App() {
                             Waiting for Players...
                         </h2>
                     </div>
-
                     {players.length === 0 ? (
                         <div className="text-center py-20 opacity-30 text-2xl font-bold italic">
                             Waiting for someone to join...
@@ -301,18 +350,20 @@ export default function App() {
                     )}
                 </div>
 
-                {/* Footer Action */}
                 <div className="mt-8 sticky bottom-6">
                     <button
                         onClick={handleStartGame}
                         disabled={players.length === 0}
                         className={`w-full py-5 text-3xl font-black rounded-2xl shadow-2xl transition-all ${players.length > 0
-                                ? 'bg-green-500 hover:bg-green-400 text-white transform hover:scale-[1.01] active:scale-[0.99]'
-                                : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                            ? 'bg-green-500 hover:bg-green-400 text-white transform hover:scale-[1.01] active:scale-[0.99]'
+                            : 'bg-slate-700 text-slate-500 cursor-not-allowed'
                             }`}
                     >
                         {players.length === 0 ? "Waiting for Players..." : "START GAME 🚀"}
                     </button>
+                    <div className="mt-4 text-center">
+                        <button onClick={handleCloseRoom} className="text-red-500 font-bold text-sm underline hover:text-red-400">Close Room</button>
+                    </div>
                 </div>
             </div>
         );
@@ -327,6 +378,8 @@ export default function App() {
                 leaderboard={leaderboard}
                 onNext={handleNextQuestion}
                 onShowLeaderboard={handleShowLeaderboard}
+                onReset={handleResetGame}
+                onClose={handleCloseRoom}
             />
         );
     }
@@ -334,13 +387,14 @@ export default function App() {
     if (view === 'PLAYER_GAME') {
         return (
             <PlayerGameView
-                state={playerGameState}
+                state={gameStatus === 'OVER' ? 'OVER' : playerGameState}
                 question={playerQuestion}
                 timer={timer}
                 onSubmit={handleSubmitAnswer}
                 result={playerResult}
                 myAnswer={myAnswer}
                 playerName={playerName}
+                leaderboard={leaderboard} // Pass leaderboard
             />
         );
     }
@@ -350,38 +404,42 @@ export default function App() {
 
 // --- SUB COMPONENTS ---
 
-function HostGameView({ status, question, stats, leaderboard, onNext, onShowLeaderboard }) {
+function HostGameView({ status, question, stats, leaderboard, onNext, onShowLeaderboard, onReset, onClose }) {
     if (status === 'QUESTION') {
         return (
-            <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4">
-                <div className="w-full max-w-6xl">
-                    <div className="flex justify-between text-3xl font-black text-gray-400 mb-6">
-                        <span>{question.questionIndex} / {question.totalQuestions}</span>
-                        <div className="flex items-center gap-2 text-purple-600">
-                            <span>⏱</span> {question.timeLimit}
+            <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+                <div className="w-full max-w-6xl h-screen flex flex-col justify-center py-6">
+                    {/* Header - Question Counter & Timer */}
+                    <div className="flex justify-between items-center text-2xl font-black text-gray-400 mb-4">
+                        <span>Q {question.questionIndex} / {question.totalQuestions}</span>
+                        <div className="flex items-center gap-2 text-purple-600 bg-purple-100 px-4 py-2 rounded-lg">
+                            <span>⏱</span> {question.timeLimit}s
                         </div>
                     </div>
 
-                    <div className="bg-white rounded-[2rem] shadow-2xl p-16 text-center mb-10 min-h-[300px] flex items-center justify-center border-b-8 border-gray-200">
-                        <h2 className="text-5xl font-black text-slate-800 leading-tight">{question.question}</h2>
+                    {/* Question Box - Compact */}
+                    <div className="bg-white rounded-2xl shadow-2xl p-8 text-center mb-6 border-b-4 border-gray-200">
+                        <h2 className="text-4xl font-black text-slate-800 leading-tight">{question.question}</h2>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-6 mb-10">
+                    {/* Options Grid - Compact */}
+                    <div className="grid grid-cols-2 gap-4 mb-6">
                         {question.options.map((opt, idx) => (
-                            <div key={idx} className={`${Colors[idx]} p-8 rounded-2xl flex items-center shadow-xl transform transition hover:scale-[1.02]`}>
-                                <div className="bg-black bg-opacity-20 w-16 h-16 rounded-full flex items-center justify-center text-white mr-6 font-bold text-2xl flex-shrink-0">
+                            <div key={idx} className={`${Colors[idx]} p-6 rounded-xl flex items-center shadow-lg`}>
+                                <div className="bg-black bg-opacity-20 w-12 h-12 rounded-full flex items-center justify-center text-white mr-4 font-bold text-xl flex-shrink-0">
                                     {idx === 0 ? '▲' : idx === 1 ? '●' : idx === 2 ? '■' : '★'}
                                 </div>
-                                <span className="text-white text-3xl font-bold">{opt}</span>
+                                <span className="text-white text-2xl font-bold leading-tight">{opt}</span>
                             </div>
                         ))}
                     </div>
 
-                    <div className="flex justify-between items-center bg-slate-800 p-6 rounded-2xl text-white">
-                        <div className="text-2xl font-bold text-slate-400">Answers Received</div>
-                        <div className="flex items-center gap-4">
-                            <span className="text-5xl font-black">{stats.answersReceived}</span>
-                            <span className="text-2xl text-slate-500 font-bold">/ {stats.totalPlayers}</span>
+                    {/* Answers Stats - Now visible without scrolling */}
+                    <div className="flex justify-between items-center bg-slate-800 p-5 rounded-xl text-white shadow-lg">
+                        <div className="text-xl font-bold text-slate-300">Answers Received</div>
+                        <div className="flex items-center gap-3">
+                            <span className="text-4xl font-black text-green-400">{stats.answersReceived}</span>
+                            <span className="text-xl text-slate-400 font-bold">/ {stats.totalPlayers}</span>
                         </div>
                     </div>
                 </div>
@@ -402,26 +460,31 @@ function HostGameView({ status, question, stats, leaderboard, onNext, onShowLead
 
     if (status === 'LEADERBOARD' || status === 'OVER') {
         return (
-            <div className="min-h-screen bg-purple-900 flex flex-col items-center p-8 text-white">
-                <h1 className="text-5xl font-black mb-12 tracking-wide uppercase">{status === 'OVER' ? '🎉 FINAL SCORES' : '🏆 Top Players'}</h1>
-                <div className="w-full max-w-3xl space-y-4">
-                    {leaderboard.map((player, idx) => (
-                        <div key={idx} className="bg-white text-purple-900 p-6 rounded-2xl flex justify-between items-center shadow-xl transform transition hover:scale-[1.02]">
-                            <div className="flex items-center gap-6">
-                                <span className={`w-14 h-14 rounded-xl flex items-center justify-center font-black text-2xl ${idx === 0 ? 'bg-yellow-400 text-white' : idx === 1 ? 'bg-gray-300 text-gray-700' : idx === 2 ? 'bg-orange-400 text-white' : 'bg-purple-100 text-purple-400'}`}>
-                                    {idx + 1}
-                                </span>
-                                <span className="font-bold text-3xl tracking-tight">{player.name}</span>
+            <div className="min-h-screen bg-purple-900 flex flex-col items-center p-6 text-white">
+                <h1 className="text-4xl font-black mb-8 mt-4 tracking-wide uppercase">{status === 'OVER' ? '🎉 FINAL SCORES' : '🏆 Top Players'}</h1>
+                <div className="w-full max-w-4xl flex-1 overflow-y-auto mb-6">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4">
+                        {leaderboard.map((player, idx) => (
+                            <div key={idx} className="bg-white text-purple-900 p-4 rounded-xl flex justify-between items-center shadow-lg">
+                                <div className="flex items-center gap-4">
+                                    <span className={`w-12 h-12 rounded-lg flex items-center justify-center font-black text-xl ${idx === 0 ? 'bg-yellow-400 text-white' : idx === 1 ? 'bg-gray-300 text-gray-700' : idx === 2 ? 'bg-orange-400 text-white' : 'bg-purple-100 text-purple-400'}`}>
+                                        {idx + 1}
+                                    </span>
+                                    <span className="font-bold text-xl tracking-tight">{player.name}</span>
+                                </div>
+                                <span className="font-black text-2xl">{player.score}</span>
                             </div>
-                            <span className="font-black text-4xl">{player.score}</span>
-                        </div>
-                    ))}
+                        ))}
+                    </div>
                 </div>
-                <div className="mt-16">
+                <div className="flex gap-4 pb-4">
                     {status !== 'OVER' ? (
-                        <button onClick={onNext} className="bg-green-500 hover:bg-green-400 px-10 py-5 rounded-xl text-2xl font-black shadow-lg">Next Question ➡️</button>
+                        <button onClick={onNext} className="bg-green-500 hover:bg-green-400 px-10 py-4 rounded-xl text-xl font-black shadow-lg">Next Question ➡️</button>
                     ) : (
-                        <button onClick={() => window.location.reload()} className="bg-white hover:bg-gray-100 text-purple-900 px-10 py-5 rounded-xl text-2xl font-black shadow-lg">Start New Game 🔄</button>
+                        <>
+                            <button onClick={onReset} className="bg-white hover:bg-gray-100 text-purple-900 px-8 py-4 rounded-xl text-xl font-black shadow-lg">Restart Game 🔄</button>
+                            <button onClick={onClose} className="bg-red-500 hover:bg-red-400 text-white px-8 py-4 rounded-xl text-xl font-black shadow-lg">End Session ❌</button>
+                        </>
                     )}
                 </div>
             </div>
@@ -430,7 +493,7 @@ function HostGameView({ status, question, stats, leaderboard, onNext, onShowLead
     return <div>Loading...</div>;
 }
 
-function PlayerGameView({ state, question, timer, onSubmit, result, myAnswer, playerName }) {
+function PlayerGameView({ state, question, timer, onSubmit, result, myAnswer, playerName, leaderboard }) {
     if (state === 'WAITING') {
         return (
             <div className="min-h-screen bg-slate-800 flex flex-col items-center justify-center text-white p-6 text-center">
@@ -444,22 +507,28 @@ function PlayerGameView({ state, question, timer, onSubmit, result, myAnswer, pl
     if (state === 'ANSWERING') {
         return (
             <div className="min-h-screen bg-gray-100 flex flex-col">
-                <div className="bg-white p-4 shadow-md flex justify-between items-center border-b-4 border-gray-200">
-                    <span className="font-bold text-gray-500">Q{question.questionIndex}</span>
-                    <div className="bg-purple-600 text-white px-4 py-2 rounded-full font-bold min-w-[80px] text-center">
-                        {timer}s
+                <div className="bg-white p-4 shadow-md border-b-4 border-gray-200">
+                    <div className="flex justify-between items-center mb-2">
+                        <span className="font-bold text-gray-500">Q{question.questionIndex}</span>
+                        <div className={`px-4 py-1 rounded-full font-bold transition-all ${timer <= 5 ? 'bg-red-600 animate-pulse' : 'bg-purple-600'} text-white`}>
+                            {timer}s
+                        </div>
                     </div>
+                    {/* QUESTION TEXT FOR MOBILE */}
+                    <h3 className="text-xl font-bold text-gray-800 leading-tight">{question.questionText}</h3>
                 </div>
-                <div className="flex-1 grid grid-cols-2 gap-4 p-4">
-                    {Array.from({ length: question.optionsCount }).map((_, idx) => (
+
+                <div className="flex-1 p-4 grid gap-4 overflow-y-auto">
+                    {question.options.map((opt, idx) => (
                         <button
                             key={idx}
                             onClick={() => onSubmit(idx)}
-                            className={`${Colors[idx]} rounded-2xl shadow-lg flex items-center justify-center active:scale-95 transition-all active:ring-4 active:ring-white`}
+                            className={`${Colors[idx]} rounded-2xl shadow-lg p-6 flex items-center active:scale-95 transition-all text-left group`}
                         >
-                            <div className="text-white text-7xl drop-shadow-md">
+                            <div className="bg-black bg-opacity-20 w-12 h-12 rounded-full flex items-center justify-center text-white mr-4 font-bold text-xl flex-shrink-0 group-active:scale-110 transition-transform">
                                 {idx === 0 ? '▲' : idx === 1 ? '●' : idx === 2 ? '■' : '★'}
                             </div>
+                            <span className="text-white text-lg font-bold leading-tight">{opt}</span>
                         </button>
                     ))}
                 </div>
@@ -487,5 +556,55 @@ function PlayerGameView({ state, question, timer, onSubmit, result, myAnswer, pl
             </div>
         );
     }
+
+    if (state === 'OVER') {
+        const myRank = parseInt(sessionStorage.getItem('playerRank')) || null;
+        const myScore = parseInt(sessionStorage.getItem('playerScore')) || 0;
+        const totalPlayers = parseInt(sessionStorage.getItem('totalPlayers')) || 0;
+
+        return (
+            <div className="min-h-screen bg-purple-900 flex flex-col items-center p-6 text-white">
+                {myRank && (
+                    <div className="w-full max-w-md mb-6 mt-4">
+                        <div className="bg-gradient-to-r from-purple-600 to-indigo-600 p-6 rounded-2xl shadow-2xl border-4 border-yellow-400">
+                            <div className="text-center mb-2">
+                                <span className="text-yellow-300 text-sm font-bold uppercase tracking-widest">Your Rank</span>
+                            </div>
+                            <div className="flex justify-between items-center">
+                                <div className="text-center flex-1">
+                                    <div className="text-6xl font-black text-white">#{myRank}</div>
+                                    <div className="text-purple-200 text-sm">of {totalPlayers}</div>
+                                </div>
+                                <div className="h-16 w-px bg-purple-400"></div>
+                                <div className="text-center flex-1">
+                                    <div className="text-4xl font-black text-yellow-300">{myScore}</div>
+                                    <div className="text-purple-200 text-sm">Points</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                <h1 className="text-3xl font-black mb-6 uppercase">🏆 Top Players</h1>
+                <div className="w-full max-w-md space-y-3">
+                    {leaderboard && leaderboard.map((player, idx) => (
+                        <div key={idx} className="bg-white text-purple-900 p-4 rounded-xl flex justify-between items-center shadow-lg">
+                            <div className="flex items-center gap-4">
+                                <span className={`w-10 h-10 rounded-lg flex items-center justify-center font-black text-xl ${idx === 0 ? 'bg-yellow-400 text-white' : idx === 1 ? 'bg-gray-300 text-gray-700' : idx === 2 ? 'bg-orange-400 text-white' : 'bg-purple-100 text-purple-400'}`}>
+                                    {idx + 1}
+                                </span>
+                                <span className="font-bold text-xl">{player.name}</span>
+                            </div>
+                            <span className="font-black text-2xl">{player.score}</span>
+                        </div>
+                    ))}
+                </div>
+                <div className="mt-8 text-center text-purple-200">
+                    Host will restart soon...
+                </div>
+            </div>
+        );
+    }
+
     return <div>Loading...</div>;
 }

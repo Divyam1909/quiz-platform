@@ -10,13 +10,18 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
     cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
+        origin: process.env.FRONTEND_URL || "https://quiz-fcrit.vercel.app",
+        methods: ["GET", "POST"],
+        credentials: true
     }
 });
 
 // --- GAME STATE ---
 const rooms = {};
+
+// Room Cleanup Config
+const ROOM_INACTIVITY_TIMEOUT = 2 * 60 * 60 * 1000; // 2 hours
+const CLEANUP_INTERVAL = 30 * 60 * 1000; // Run cleanup every 30 minutes
 
 // Helper: Generate 6-digit random code
 const generateRoomCode = () => {
@@ -27,6 +32,32 @@ const generateRoomCode = () => {
     }
     return result;
 };
+
+// Helper: Update room activity timestamp
+const touchRoom = (roomCode) => {
+    if (rooms[roomCode]) {
+        rooms[roomCode].lastActivity = Date.now();
+    }
+};
+
+// Periodic Room Cleanup
+setInterval(() => {
+    const now = Date.now();
+    const roomCodes = Object.keys(rooms);
+
+    roomCodes.forEach(code => {
+        const room = rooms[code];
+        if (now - room.lastActivity > ROOM_INACTIVITY_TIMEOUT) {
+            console.log(`Cleaning up inactive room: ${code}`);
+            clearInterval(room.timer);
+            delete rooms[code];
+        }
+    });
+
+    if (roomCodes.length > 0) {
+        console.log(`Room cleanup: ${roomCodes.length} rooms checked, ${Object.keys(rooms).length} active`);
+    }
+}, CLEANUP_INTERVAL);
 
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
@@ -45,16 +76,26 @@ io.on('connection', (socket) => {
                 room.hostId = socket.id;
                 socket.join(roomCode);
 
-                // Resend current full state
+                // Resend current state (optimized - only current question, not entire quiz)
+                const currentQuestion = room.currentQuestionIndex < room.quiz.questions.length
+                    ? room.quiz.questions[room.currentQuestionIndex]
+                    : null;
+
                 socket.emit('session_restored', {
                     role: 'HOST',
                     roomCode,
-                    gameState: room.gameState,
+                    gameState: room.gameState === 'FINISHED' ? 'OVER' : room.gameState,
                     players: Object.values(room.players),
-                    question: room.currentQuestionIndex < room.quiz.questions.length ? room.quiz.questions[room.currentQuestionIndex] : null,
+                    question: currentQuestion ? {
+                        text: currentQuestion.text,
+                        options: currentQuestion.options,
+                        correctAnswer: currentQuestion.correctAnswer,
+                        timeLimit: currentQuestion.timeLimit
+                    } : null,
                     stats: { answersReceived: room.answersReceived, totalPlayers: Object.keys(room.players).length },
                     leaderboard: room.leaderboard || []
                 });
+                touchRoom(roomCode);
                 console.log(`Host reconnected to ${roomCode}`);
             } else {
                 socket.emit('session_invalid');
@@ -66,20 +107,33 @@ io.on('connection', (socket) => {
                 player.socketId = socket.id;
                 socket.join(roomCode);
 
+                // Calculate actual remaining time if in question
+                let currentQuestion = null;
+                if (room.gameState === 'QUESTION' || room.gameState === 'ANSWERING') {
+                    const question = room.quiz.questions[room.currentQuestionIndex];
+                    const timeLimit = question.timeLimit || 20;
+                    const elapsed = Math.floor((Date.now() - room.questionStartTime) / 1000);
+                    const timeRemaining = Math.max(0, timeLimit - elapsed);
+
+                    currentQuestion = {
+                        questionText: question.text,
+                        options: question.options,
+                        questionIndex: room.currentQuestionIndex + 1,
+                        optionsCount: question.options.length,
+                        timeLimit: timeRemaining, // Send actual remaining time, not original limit
+                        startTime: room.questionStartTime
+                    };
+                }
+
                 socket.emit('session_restored', {
                     role: 'PLAYER',
                     roomCode,
-                    gameState: room.gameState,
+                    gameState: room.gameState === 'FINISHED' ? 'OVER' : room.gameState,
                     playerName: player.name,
                     score: player.score,
-                    // If in question, send question data
-                    currentQuestion: room.gameState === 'QUESTION' || room.gameState === 'ANSWERING' ? {
-                        questionIndex: room.currentQuestionIndex + 1,
-                        optionsCount: room.quiz.questions[room.currentQuestionIndex].options.length,
-                        timeLimit: room.quiz.questions[room.currentQuestionIndex].timeLimit, // Should calc remaining but ok for now
-                        startTime: room.questionStartTime
-                    } : null
+                    currentQuestion
                 });
+                touchRoom(roomCode);
                 console.log(`Player ${player.name} reconnected to ${roomCode}`);
             } else {
                 socket.emit('session_invalid');
@@ -103,7 +157,8 @@ io.on('connection', (socket) => {
             currentQuestionIndex: 0,
             timer: null,
             answersReceived: 0,
-            leaderboard: []
+            leaderboard: [],
+            lastActivity: Date.now() // Track room activity for cleanup
         };
 
         socket.join(roomCode);
@@ -115,6 +170,7 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         // Security check: ensure caller is owner (or reconnected owner)
         if (room && room.hostId === socket.id) {
+            touchRoom(roomCode);
             startGame(roomCode);
         }
     });
@@ -127,9 +183,24 @@ io.on('connection', (socket) => {
                 sendQuestion(roomCode);
             } else {
                 room.gameState = 'FINISHED';
-                const finalLeaderboard = calculateLeaderboard(room);
-                room.leaderboard = finalLeaderboard; // Store for refresh
-                io.to(roomCode).emit('game_over', finalLeaderboard);
+                const fullLeaderboard = calculateFullLeaderboard(room);
+                const top5 = fullLeaderboard.slice(0, 5);
+                room.leaderboard = fullLeaderboard; // Store full for refresh
+
+                // Send full leaderboard to host
+                io.to(room.hostId).emit('game_over', { leaderboard: fullLeaderboard, isHost: true });
+
+                // Send personalized data to each player
+                Object.values(room.players).forEach(player => {
+                    const playerRank = fullLeaderboard.findIndex(p => p.id === player.id) + 1;
+                    io.to(player.socketId).emit('game_over', {
+                        leaderboard: top5,
+                        playerRank,
+                        playerScore: player.score,
+                        totalPlayers: fullLeaderboard.length,
+                        isHost: false
+                    });
+                });
             }
         }
     });
@@ -138,9 +209,37 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if (room && room.hostId === socket.id) {
             room.gameState = 'LEADERBOARD';
-            const board = calculateLeaderboard(room);
+            const board = calculateFullLeaderboard(room).slice(0, 5);
             room.leaderboard = board;
             io.to(roomCode).emit('show_leaderboard', board);
+        }
+    });
+
+    socket.on('reset_game', (roomCode) => {
+        const room = rooms[roomCode];
+        if (room && room.hostId === socket.id) {
+            room.gameState = 'LOBBY';
+            room.currentQuestionIndex = 0;
+            room.answersReceived = 0;
+            room.leaderboard = [];
+
+            // Reset player scores for new game
+            Object.values(room.players).forEach(p => {
+                p.score = 0;
+                p.streak = 0;
+                p.lastAnswerTime = 0;
+                p.hasAnsweredThisRound = false;
+            });
+
+            io.to(roomCode).emit('game_reset', room.quiz.title);
+        }
+    });
+
+    socket.on('close_room', (roomCode) => {
+        const room = rooms[roomCode];
+        if (room && room.hostId === socket.id) {
+            delete rooms[roomCode];
+            io.to(roomCode).emit('room_closed');
         }
     });
 
@@ -151,19 +250,14 @@ io.on('connection', (socket) => {
 
         if (!room) return callback({ error: "Room not found" });
         if (room.gameState !== 'LOBBY' && !room.players[playerId]) {
-            // Allow rejoin if specifically known, but not new joiners mid-game (simplification)
             return callback({ error: "Game in progress" });
         }
 
-        // Check rename or rejoin
         const existingPlayer = Object.values(room.players).find(p => p.name === playerName);
-
-        // If name exists AND it's not THIS player trying to reconnect
         if (existingPlayer && existingPlayer.id !== playerId) {
             return callback({ error: "Name taken" });
         }
 
-        // Add or Update Player
         room.players[playerId] = {
             id: playerId,
             socketId: socket.id,
@@ -175,6 +269,7 @@ io.on('connection', (socket) => {
         };
 
         socket.join(roomCode);
+        touchRoom(roomCode);
         io.to(room.hostId).emit('player_joined', Object.values(room.players));
 
         callback({ success: true, quizTitle: room.quiz.title });
@@ -185,7 +280,6 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
         if (!room || room.gameState !== 'QUESTION') return;
 
-        // Use playerId to look up player
         const player = room.players[playerId];
         if (!player) return;
 
@@ -200,6 +294,7 @@ io.on('connection', (socket) => {
         if (isCorrect) {
             const timeLimit = question.timeLimit || 20;
             const safeTime = Math.min(timeRemaining, timeLimit);
+            // Formula already present
             points = Math.round(600 + (400 * (safeTime / timeLimit)));
             player.score += points;
             player.streak += 1;
@@ -207,25 +302,19 @@ io.on('connection', (socket) => {
             player.streak = 0;
         }
 
-        // Send individual result
         socket.emit('answer_received', { submitted: true });
-
-        // Notify host
+        touchRoom(roomCode);
         io.to(room.hostId).emit('live_stats', {
             answersReceived: room.answersReceived,
             totalPlayers: Object.keys(room.players).length
         });
 
-        // Auto Advance
         if (room.answersReceived === Object.keys(room.players).length) {
             endQuestion(roomCode);
         }
     });
 
-    socket.on('disconnect', () => {
-        // We do NOT remove players on disconnect anymore to allow refresh
-        // They stay in the room.players object
-    });
+    socket.on('disconnect', () => { });
 });
 
 // --- HELPERS ---
@@ -242,7 +331,7 @@ function sendQuestion(roomCode) {
 
     room.gameState = 'QUESTION';
     room.answersReceived = 0;
-    room.questionStartTime = Date.now(); // Sync time
+    room.questionStartTime = Date.now();
 
     Object.values(room.players).forEach(p => p.hasAnsweredThisRound = false);
 
@@ -255,20 +344,25 @@ function sendQuestion(roomCode) {
         totalQuestions: room.quiz.questions.length
     });
 
-    // Players
+    // Players - Send to all players in room (host is also in room but won't use this event)
+    // Note: io.to(roomCode) sends to everyone in the room including host
+    // The host client simply ignores player-specific events, which is fine for simplicity
     io.to(roomCode).emit('new_question_player', {
+        questionText: question.text,
+        options: question.options,
         optionsCount: question.options.length,
         timeLimit: question.timeLimit || 20,
         questionIndex: room.currentQuestionIndex + 1
     });
 
-    // Timer
     let timeLeft = question.timeLimit || 20;
     room.timeRemaining = timeLeft;
     clearInterval(room.timer);
+    touchRoom(roomCode);
 
     room.timer = setInterval(() => {
         room.timeRemaining--;
+        touchRoom(roomCode);
         if (room.timeRemaining <= 0) {
             endQuestion(roomCode);
         }
@@ -287,10 +381,9 @@ function endQuestion(roomCode) {
     });
 }
 
-function calculateLeaderboard(room) {
+function calculateFullLeaderboard(room) {
     return Object.values(room.players)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 5);
+        .sort((a, b) => b.score - a.score);
 }
 
 const PORT = process.env.PORT || 3001;
