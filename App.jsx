@@ -211,6 +211,12 @@ export default function App() {
     // --- ACTIONS ---
 
     const handleCreateQuiz = () => {
+        const password = prompt("Enter admin password to host a quiz:");
+        if (password !== 'admin') {
+            alert("Incorrect password. Only admins can host quizzes.");
+            return;
+        }
+
         setIsLoading(true);
         vibrate([30]);
         socket.emit('create_room', quizData, (response) => {

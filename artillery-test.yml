@@ -38,7 +38,7 @@ scenarios:
       - emit:
           channel: "join_room"
           data:
-            roomCode: "PB6ND7"  # Production room code
+            roomCode: "F37GA9"  # Production room code
             playerName: "Player_{{ $randomString() }}"
             playerId: "uid_{{ $randomString() }}"
           acknowledge:
@@ -55,7 +55,7 @@ scenarios:
             - emit:
                 channel: "submit_answer"
                 data:
-                  roomCode: "PB6ND7"
+                  roomCode: "F37GA9"
                   answerIndex: "{{ $randomNumber(0, 3) }}"
                   timeRemaining: "{{ $randomNumber(2, 8) }}"
                   playerId: "uid_{{ $randomString() }}"
@@ -73,7 +73,7 @@ scenarios:
             - emit:
                 channel: "submit_answer"
                 data:
-                  roomCode: "PB6ND7"
+                  roomCode: "F37GA9"
                   answerIndex: "{{ $randomNumber(0, 3) }}"
                   timeRemaining: "{{ $randomNumber(2, 8) }}"
                   playerId: "uid_{{ $randomString() }}"
