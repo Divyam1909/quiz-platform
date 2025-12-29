@@ -1,0 +1,170 @@
+{
+    "title": "Ultimate Fun Quiz",
+    "questions": [
+        {
+            "text": "Which of these habits is hardest to break after college?",
+            "options": [
+                "Sleeping late",
+                "Procrastinating",
+                "Checking phone first thing",
+                "Saying “I’ll do it tomorrow”"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 8
+        },
+        {
+            "text": "Which skill from college helps the most in real life?",
+            "options": [
+                "Time management",
+                "Networking",
+                "Presentation skills",
+                "Jugaad"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 8
+        },
+        {
+            "text": "What usually survives longer than college friendships?",
+            "options": [
+                "Notes",
+                "Memories",
+                "Group chats",
+                "Assignments"
+            ],
+            "correctAnswer": 2,
+            "timeLimit": 8
+        },
+        {
+            "text": "Which thing did everyone promise to do “from tomorrow” in college?",
+            "options": [
+                "Wake up early",
+                "Study regularly",
+                "Eat healthy",
+                "All of the above"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 8
+        },
+        {
+            "text": "Which app silently replaced emails for most alumni?",
+            "options": [
+                "Telegram",
+                "Slack",
+                "WhatsApp",
+                "LinkedIn"
+            ],
+            "correctAnswer": 2,
+            "timeLimit": 7
+        },
+        {
+            "text": "What is the most common reaction to seeing an old campus photo?",
+            "options": [
+                "So cringe",
+                "Good old days",
+                "Who clicked this?",
+                "All of the above"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 8
+        },
+        {
+            "text": "Which of these is most likely to happen at an alumni meet?",
+            "options": [
+                "Career comparison",
+                "Nostalgia overload",
+                "“Do you remember…?”",
+                "All of the above"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 8
+        },
+        {
+            "text": "What do people secretly check most after graduation?",
+            "options": [
+                "Salary",
+                "Job title",
+                "Work-life balance",
+                "LinkedIn views"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 7
+        },
+        {
+            "text": "Which phrase best describes college life?",
+            "options": [
+                "Chaotic",
+                "Memorable",
+                "Stressful",
+                "All of the above"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 7
+        },
+        {
+            "text": "What did college NOT officially teach but everyone learned?",
+            "options": [
+                "Negotiation",
+                "Multitasking",
+                "Crisis management",
+                "All of the above"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 8
+        },
+        {
+            "text": "Which feels shortest when you look back?",
+            "options": [
+                "Semesters",
+                "Internships",
+                "Exams",
+                "College years"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 7
+        },
+        {
+            "text": "What changes the most after graduation?",
+            "options": [
+                "Priorities",
+                "Friend circle",
+                "Sleep schedule",
+                "All of the above"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 8
+        },
+        {
+            "text": "Which word best defines alumni life?",
+            "options": [
+                "Balance",
+                "Hustle",
+                "Adjustment",
+                "Adaptation"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 7
+        },
+        {
+            "text": "What do alumni miss the most?",
+            "options": [
+                "Freedom",
+                "Friends",
+                "Campus vibe",
+                "All of the above"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 8
+        },
+        {
+            "text": "Which mask best fits alumni life? (Masquerade edition)",
+            "options": [
+                "Confident",
+                "Busy",
+                "Successful",
+                "Still figuring it out"
+            ],
+            "correctAnswer": 3,
+            "timeLimit": 8
+        }
+    ]
+}
