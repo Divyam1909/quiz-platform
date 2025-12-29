@@ -249,6 +249,13 @@ io.on('connection', (socket) => {
         const room = rooms[roomCode];
 
         if (!room) return callback({ error: "Room not found" });
+
+        // CRITICAL: Prevent host socket from being treated as a player
+        if (socket.id === room.hostId) {
+            console.log(`Blocked host socket from joining as player in ${roomCode}`);
+            return callback({ error: "Host cannot join as player" });
+        }
+
         if (room.gameState !== 'LOBBY' && !room.players[playerId]) {
             return callback({ error: "Game in progress" });
         }
@@ -258,13 +265,13 @@ io.on('connection', (socket) => {
             return callback({ error: "Name taken" });
         }
 
+        // Add or update player
         room.players[playerId] = {
             id: playerId,
             socketId: socket.id,
             name: playerName,
-            score: 0,
-            streak: 0,
-            lastAnswerTime: 0,
+            score: room.players[playerId]?.score || 0,
+            streak: room.players[playerId]?.streak || 0,
             hasAnsweredThisRound: false
         };
 
