@@ -235,17 +235,25 @@ export default function App() {
     if (view === 'HOST_LOBBY') {
         return (
             <div className="min-h-screen bg-indigo-800 text-white p-6 flex flex-col">
-                <div className="flex justify-between items-start">
-                    <div>
-                        <p className="text-indigo-300 font-bold uppercase tracking-wider text-sm">Join at www.yoursite.com</p>
-                        <div className="bg-white text-indigo-900 px-6 py-2 rounded-lg inline-block mt-2">
-                            <span className="text-sm font-bold block text-gray-500">GAME PIN:</span>
-                            <span className="text-5xl font-black tracking-widest">{roomCode}</span>
+                <div className="flex flex-col md:flex-row justify-between items-center bg-indigo-900 border-b border-indigo-700 pb-4">
+                    <div className="mb-4 md:mb-0">
+                        <p className="text-indigo-300 font-bold uppercase tracking-wider text-sm mb-1">To join, visit:</p>
+                        <p className="text-3xl font-bold text-white tracking-tight text-shadow-lg">
+                            {window.location.hostname}
+                        </p>
+                        <div className="bg-white text-indigo-900 px-8 py-3 rounded-xl inline-block mt-4 shadow-lg transform rotate-[-2deg]">
+                            <span className="text-sm font-bold block text-gray-500 uppercase tracking-widest">Game PIN</span>
+                            <span className="text-6xl font-black tracking-widest leading-none">{roomCode}</span>
                         </div>
                     </div>
-                    <div className="bg-white p-2 rounded-lg">
-                        {/* Fallback QR if package missing */}
-                        <img src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${roomCode}`} alt="QR Code" className="w-32 h-32" />
+
+                    <div className="bg-white p-4 rounded-xl shadow-2xl flex flex-col items-center">
+                        <QRCodeSVG
+                            value={window.location.origin}
+                            size={200}
+                            className="mb-2"
+                        />
+                        <p className="text-gray-500 text-xs font-bold uppercase tracking-widest">Scan to Join</p>
                     </div>
                 </div>
 
