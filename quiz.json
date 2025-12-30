@@ -1,27 +1,23 @@
 {
-    "title": "Load Test Quiz",
+    "title": "Live Poll",
     "questions": [
         {
-            "text": "What is 2 + 2?",
+            "text": "What is your favorite programming language?",
             "options": [
-                "3",
-                "4",
-                "5",
-                "6"
-            ],
-            "correctAnswer": 1,
-            "timeLimit": 10
+                "JavaScript",
+                "Python",
+                "Java",
+                "C++"
+            ]
         },
         {
-            "text": "What color is the sky?",
+            "text": "What is your preferred development environment?",
             "options": [
-                "Red",
-                "Blue",
-                "Green",
-                "Yellow"
-            ],
-            "correctAnswer": 1,
-            "timeLimit": 10
+                "VS Code",
+                "IntelliJ IDEA",
+                "Vim/Neovim",
+                "Sublime Text"
+            ]
         }
     ]
 }

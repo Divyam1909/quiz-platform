@@ -1,25 +1,26 @@
 import React, { useState, useEffect } from 'react';
 import { io } from 'socket.io-client';
 import { QRCodeSVG } from 'qrcode.react';
-import quizData from './quiz.json';
+import pollData from './quiz.json';
 
 // --- CONFIGURATION ---
 const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001';
 
 // --- HELPERS ---
 const generateId = () => Math.random().toString(36).substr(2, 9);
-const getSession = () => JSON.parse(sessionStorage.getItem('quiz_session')) || {};
-const setSession = (data) => sessionStorage.setItem('quiz_session', JSON.stringify({ ...getSession(), ...data }));
+const getSession = () => JSON.parse(sessionStorage.getItem('poll_session')) || {};
+const setSession = (data) => sessionStorage.setItem('poll_session', JSON.stringify({ ...getSession(), ...data }));
 
 // --- ICONS & ASSETS ---
-const Colors = ['bg-red-500', 'bg-blue-500', 'bg-yellow-500', 'bg-green-500'];
+const Colors = ['#ef4444', '#3b82f6', '#eab308', '#22c55e']; // red, blue, yellow, green
+const ColorsBg = ['bg-red-500', 'bg-blue-500', 'bg-yellow-500', 'bg-green-500'];
 
 export default function App() {
     const [socket, setSocket] = useState(null);
     const [view, setView] = useState('LANDING');
     const [role, setRole] = useState(null);
     const [connectionError, setConnectionError] = useState(false);
-    const [isLoading, setIsLoading] = useState(false); // Loading state
+    const [isLoading, setIsLoading] = useState(false);
 
     // Shared State
     const [roomCode, setRoomCode] = useState('');
@@ -29,16 +30,14 @@ export default function App() {
     // Host State
     const [players, setPlayers] = useState([]);
     const [hostQuestion, setHostQuestion] = useState(null);
-    const [liveStats, setLiveStats] = useState({ answersReceived: 0, totalPlayers: 0 });
-    const [leaderboard, setLeaderboard] = useState([]);
+    const [liveVotes, setLiveVotes] = useState({ answersReceived: 0, totalPlayers: 0, voteData: [] });
     const [gameStatus, setGameStatus] = useState('LOBBY');
 
     // Player State
     const [playerGameState, setPlayerGameState] = useState('WAITING');
     const [playerQuestion, setPlayerQuestion] = useState(null);
-    const [playerResult, setPlayerResult] = useState(null);
-    const [timer, setTimer] = useState(0);
-    const [myAnswer, setMyAnswer] = useState(null);
+    const [myVote, setMyVote] = useState(null);
+    const [sameOptionCount, setSameOptionCount] = useState(0);
 
     // Helper: Vibrate on mobile
     const vibrate = (pattern = [50]) => {
@@ -49,10 +48,10 @@ export default function App() {
 
     // --- INITIALIZATION ---
     useEffect(() => {
-        let storedId = localStorage.getItem('quiz_player_id');
+        let storedId = localStorage.getItem('poll_player_id');
         if (!storedId) {
             storedId = generateId();
-            localStorage.setItem('quiz_player_id', storedId);
+            localStorage.setItem('poll_player_id', storedId);
         }
         setMyId(storedId);
 
@@ -60,7 +59,10 @@ export default function App() {
         const urlPin = params.get('pin');
         if (urlPin) setRoomCode(urlPin);
 
-        const newSocket = io(BACKEND_URL);
+        const newSocket = io(BACKEND_URL, {
+            transports: ['websocket', 'polling'],
+            upgrade: true
+        });
         setSocket(newSocket);
 
         newSocket.on('connect', () => {
@@ -88,27 +90,36 @@ export default function App() {
             setRole(data.role);
             setRoomCode(data.roomCode);
             setGameStatus(data.gameState);
-            setLeaderboard(data.leaderboard); // IMPORTANT for final screen
 
             if (data.role === 'HOST') {
                 setView(data.gameState === 'LOBBY' ? 'HOST_LOBBY' : 'HOST_GAME');
                 setPlayers(data.players || []);
                 if (data.gameState === 'QUESTION') {
                     setHostQuestion({
-                        question: data.question.title /* fix from server? sent text */ || data.question.text,
-                        timeLimit: data.question.timeLimit,
+                        question: data.question.text,
+                        options: data.question.options,
                         questionIndex: 1,
-                        totalQuestions: 10,
-                        options: data.question.options
+                        totalQuestions: 10
                     });
+                    if (data.voteCounts) {
+                        const voteData = data.question.options.map((opt, idx) => ({
+                            option: opt,
+                            count: data.voteCounts[idx] || 0,
+                            percentage: 0
+                        }));
+                        setLiveVotes({
+                            answersReceived: data.stats.answersReceived,
+                            totalPlayers: data.stats.totalPlayers,
+                            voteData
+                        });
+                    }
                 }
             } else {
                 setView('PLAYER_GAME');
                 setPlayerName(data.playerName);
                 if (data.gameState === 'QUESTION' || data.gameState === 'ANSWERING') {
-                    setPlayerGameState('ANSWERING');
+                    setPlayerGameState(data.hasVoted ? 'SUBMITTED' : 'ANSWERING');
                     setPlayerQuestion(data.currentQuestion);
-                    setTimer(data.currentQuestion.timeLimit);
                 } else if (data.gameState === 'LOBBY') {
                     setPlayerGameState('WAITING');
                 } else if (data.gameState === 'OVER') {
@@ -118,108 +129,77 @@ export default function App() {
         });
 
         socket.on('session_invalid', () => {
-            sessionStorage.removeItem('quiz_session');
+            sessionStorage.removeItem('poll_session');
             setView('LANDING');
         });
 
         // --- GLOBAL EVENTS ---
         socket.on('game_reset', () => {
             setGameStatus('LOBBY');
-            setLeaderboard([]);
-            setPlayers([]); // Wait for join events or keep them? Server keeps them.
-            // Actually, server keeps them, so we shouldn't wipe local players if we are host, 
-            // but `player_joined` usually updates it. 
-            // Let's rely on server state.
-            // For Player:
             setPlayerGameState('WAITING');
             setPlayerQuestion(null);
-            setPlayerResult(null);
-            setMyAnswer(null);
-            // For Host:
-            setView('HOST_LOBBY');
+            setMyVote(null);
+            setSameOptionCount(0);
+            setView(role === 'HOST' ? 'HOST_LOBBY' : 'PLAYER_GAME');
         });
 
         socket.on('room_closed', () => {
             alert("The host has ended the session.");
-            sessionStorage.removeItem('quiz_session');
+            sessionStorage.removeItem('poll_session');
             window.location.href = '/';
         });
 
         // --- HOST LISTENERS ---
         socket.on('player_joined', (updatedPlayers) => setPlayers(updatedPlayers));
+
         socket.on('new_question_host', (data) => {
             setHostQuestion(data);
             setGameStatus('QUESTION');
             setView('HOST_GAME');
-            setLiveStats({ answersReceived: 0, totalPlayers: players.length });
+            setLiveVotes({
+                answersReceived: 0,
+                totalPlayers: players.length,
+                voteData: data.voteData || []
+            });
         });
-        socket.on('live_stats', (stats) => setLiveStats(prev => ({ ...prev, ...stats })));
-        socket.on('question_ended', () => setGameStatus('RESULT'));
-        socket.on('show_leaderboard', (data) => {
-            setLeaderboard(data);
-            setGameStatus('LEADERBOARD');
-        });
-        socket.on('game_over', (data) => {
-            // Handle both array (old format) and object (new format)
-            if (Array.isArray(data)) {
-                // Legacy format
-                setLeaderboard(data);
-                setGameStatus('OVER');
-            } else {
-                // New personalized format
-                setLeaderboard(data.leaderboard);
-                setGameStatus('OVER');
 
-                // Store player's personal rank if provided
-                if (data.playerRank) {
-                    sessionStorage.setItem('playerRank', data.playerRank);
-                    sessionStorage.setItem('playerScore', data.playerScore);
-                    sessionStorage.setItem('totalPlayers', data.totalPlayers);
-                }
-            }
+        socket.on('live_votes', (data) => {
+            setLiveVotes(data);
+        });
+
+        socket.on('poll_over', () => {
+            setGameStatus('OVER');
+            setPlayerGameState('OVER');
         });
 
         // --- PLAYER LISTENERS ---
         socket.on('new_question_player', (data) => {
             setPlayerQuestion(data);
             setPlayerGameState('ANSWERING');
-            setTimer(data.timeLimit);
-            setMyAnswer(null);
-            setPlayerResult(null);
-        });
-        socket.on('answer_received', () => setPlayerGameState('SUBMITTED'));
-        socket.on('question_ended', (data) => {
-            setPlayerGameState('RESULT');
-            setPlayerResult(data);
+            setMyVote(null);
+            setSameOptionCount(0);
         });
 
-    }, [socket, players.length]);
+        socket.on('vote_received', (data) => {
+            setPlayerGameState('SUBMITTED');
+            setSameOptionCount(data.sameOptionCount || 0);
+        });
 
-    useEffect(() => {
-        if (timer > 0 && playerGameState === 'ANSWERING') {
-            const interval = setInterval(() => {
-                setTimer(t => {
-                    if (t === 5) vibrate([200]); // Warning vibration at 5 seconds
-                    return t - 1;
-                });
-            }, 1000);
-            return () => clearInterval(interval);
-        }
-    }, [timer, playerGameState]);
+    }, [socket, players.length, role]);
 
 
     // --- ACTIONS ---
 
-    const handleCreateQuiz = () => {
-        const password = prompt("Enter admin password to host a quiz:");
+    const handleCreatePoll = () => {
+        const password = prompt("Enter admin password to host a poll:");
         if (password !== 'admin') {
-            alert("Incorrect password. Only admins can host quizzes.");
+            alert("Incorrect password. Only admins can host polls.");
             return;
         }
 
         setIsLoading(true);
         vibrate([30]);
-        socket.emit('create_room', quizData, (response) => {
+        socket.emit('create_room', pollData, (response) => {
             setRoomCode(response.roomCode);
             setRole('HOST');
             setView('HOST_LOBBY');
@@ -235,8 +215,8 @@ export default function App() {
             socket.emit('start_game', roomCode);
         }
     };
+
     const handleNextQuestion = () => socket.emit('next_question', roomCode);
-    const handleShowLeaderboard = () => socket.emit('show_leaderboard', roomCode);
 
     const handleResetGame = () => {
         socket.emit('reset_game', roomCode);
@@ -266,12 +246,12 @@ export default function App() {
         });
     };
 
-    const handleSubmitAnswer = (index) => {
+    const handleSubmitVote = (index) => {
         if (playerGameState !== 'ANSWERING') return;
-        if (myAnswer !== null) return; // Prevent re-answering
-        vibrate([100]); // Strong vibration on answer
-        setMyAnswer(index);
-        socket.emit('submit_answer', { roomCode, answerIndex: index, timeRemaining: timer, playerId: myId });
+        if (myVote !== null) return;
+        vibrate([100]);
+        setMyVote(index);
+        socket.emit('submit_vote', { roomCode, optionIndex: index, playerId: myId });
     };
 
 
@@ -281,14 +261,14 @@ export default function App() {
 
     if (view === 'LANDING') {
         return (
-            <div className="min-h-screen bg-indigo-900 flex flex-col items-center justify-center text-white p-4 font-sans">
-                <h1 className="text-6xl font-black mb-8 tracking-tighter transform -rotate-2">QUIZ<span className="text-yellow-400">MASTER</span></h1>
-                <div className="bg-white text-gray-800 p-8 rounded-2xl shadow-2xl w-full max-w-md space-y-6">
+            <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white p-4 font-sans">
+                <h1 className="text-6xl font-black mb-8 tracking-tighter transform -rotate-2">LIVE<span className="text-pink-500">POLL</span></h1>
+                <div className="bg-slate-800 text-gray-100 p-8 rounded-2xl shadow-2xl w-full max-w-md space-y-6 border border-slate-700">
                     <div className="space-y-4">
                         <input
                             type="text"
-                            placeholder="GAME PIN"
-                            className="w-full text-center text-3xl p-4 border-b-4 border-gray-300 rounded-lg focus:border-indigo-600 focus:outline-none uppercase tracking-[0.2em] font-black bg-gray-50 placeholder-gray-300"
+                            placeholder="POLL PIN"
+                            className="w-full text-center text-3xl p-4 border-b-4 border-slate-600 rounded-lg focus:border-pink-500 focus:outline-none uppercase tracking-[0.2em] font-black bg-slate-700 placeholder-slate-500"
                             value={roomCode}
                             onChange={e => setRoomCode(e.target.value)}
                             maxLength={6}
@@ -296,18 +276,18 @@ export default function App() {
                         <input
                             type="text"
                             placeholder="Enter Nickname"
-                            className="w-full text-center text-xl p-4 border-2 border-gray-200 rounded-lg focus:border-indigo-600 focus:outline-none font-bold"
+                            className="w-full text-center text-xl p-4 border-2 border-slate-600 rounded-lg focus:border-pink-500 focus:outline-none font-bold bg-slate-700"
                             value={playerName}
                             onChange={e => setPlayerName(e.target.value)}
                         />
-                        <button onClick={handleJoinRoom} disabled={isLoading} className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 disabled:cursor-not-allowed text-white font-black py-4 rounded-xl shadow-lg transform transition active:scale-95 text-xl flex items-center justify-center gap-2">
+                        <button onClick={handleJoinRoom} disabled={isLoading} className="w-full bg-pink-600 hover:bg-pink-500 disabled:bg-pink-900 disabled:cursor-not-allowed text-white font-black py-4 rounded-xl shadow-lg transform transition active:scale-95 text-xl flex items-center justify-center gap-2">
                             {isLoading && <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>}
-                            {isLoading ? 'JOINING...' : 'JOIN GAME'}
+                            {isLoading ? 'JOINING...' : 'JOIN POLL'}
                         </button>
                     </div>
-                    <div className="border-t border-gray-100 pt-6 text-center">
-                        <button onClick={handleCreateQuiz} className="text-gray-400 hover:text-indigo-600 font-bold text-sm underline">
-                            Host a Quiz
+                    <div className="border-t border-slate-700 pt-6 text-center">
+                        <button onClick={handleCreatePoll} className="text-slate-400 hover:text-pink-400 font-bold text-sm underline">
+                            Host a Poll
                         </button>
                     </div>
                 </div>
@@ -323,8 +303,8 @@ export default function App() {
                     <div>
                         <p className="text-slate-400 font-bold uppercase tracking-widest text-sm mb-2">Join at {window.location.hostname}</p>
                         <div className="flex items-center gap-4">
-                            <div className="bg-indigo-600 px-6 py-2 rounded-lg shadow-lg">
-                                <span className="text-sm font-bold block text-indigo-200 uppercase">Current PIN</span>
+                            <div className="bg-pink-600 px-6 py-2 rounded-lg shadow-lg">
+                                <span className="text-sm font-bold block text-pink-200 uppercase">Poll PIN</span>
                                 <span className="text-5xl font-black tracking-widest font-mono">{roomCode}</span>
                             </div>
                         </div>
@@ -338,7 +318,7 @@ export default function App() {
                     <div className="flex justify-between items-center mb-6">
                         <h2 className="text-3xl font-black flex items-center gap-3">
                             <span className="bg-green-500 text-white px-3 py-1 rounded-lg text-lg">{players.length}</span>
-                            Waiting for Players...
+                            Waiting for Participants...
                         </h2>
                     </div>
                     {players.length === 0 ? (
@@ -348,7 +328,7 @@ export default function App() {
                     ) : (
                         <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
                             {players.map((p, i) => (
-                                <div key={i} className="bg-white text-slate-900 p-4 rounded-xl shadow-lg font-bold text-lg text-center transform transition hover:-translate-y-1 hover:shadow-2xl flex items-center justify-center min-h-[80px] border-b-4 border-gray-200">
+                                <div key={i} className="bg-slate-800 text-white p-4 rounded-xl shadow-lg font-bold text-lg text-center transform transition hover:-translate-y-1 hover:shadow-2xl flex items-center justify-center min-h-[80px] border border-slate-700">
                                     {p.name}
                                 </div>
                             ))}
@@ -365,7 +345,7 @@ export default function App() {
                             : 'bg-slate-700 text-slate-500 cursor-not-allowed'
                             }`}
                     >
-                        {players.length === 0 ? "Waiting for Players..." : "START GAME 🚀"}
+                        {players.length === 0 ? "Waiting for Participants..." : "START POLL 🚀"}
                     </button>
                     <div className="mt-4 text-center">
                         <button onClick={handleCloseRoom} className="text-red-500 font-bold text-sm underline hover:text-red-400">Close Room</button>
@@ -380,12 +360,11 @@ export default function App() {
             <HostGameView
                 status={gameStatus}
                 question={hostQuestion}
-                stats={liveStats}
-                leaderboard={leaderboard}
+                liveVotes={liveVotes}
                 onNext={handleNextQuestion}
-                onShowLeaderboard={handleShowLeaderboard}
                 onReset={handleResetGame}
                 onClose={handleCloseRoom}
+                roomCode={roomCode}
             />
         );
     }
@@ -395,12 +374,10 @@ export default function App() {
             <PlayerGameView
                 state={gameStatus === 'OVER' ? 'OVER' : playerGameState}
                 question={playerQuestion}
-                timer={timer}
-                onSubmit={handleSubmitAnswer}
-                result={playerResult}
-                myAnswer={myAnswer}
+                onSubmit={handleSubmitVote}
+                myVote={myVote}
                 playerName={playerName}
-                leaderboard={leaderboard} // Pass leaderboard
+                sameOptionCount={sameOptionCount}
             />
         );
     }
@@ -410,96 +387,145 @@ export default function App() {
 
 // --- SUB COMPONENTS ---
 
-function HostGameView({ status, question, stats, leaderboard, onNext, onShowLeaderboard, onReset, onClose }) {
+function HostGameView({ status, question, liveVotes, onNext, onReset, onClose, roomCode }) {
     if (status === 'QUESTION') {
+        const maxVotes = Math.max(...(liveVotes.voteData?.map(d => d.count) || [1]), 1);
+
         return (
-            <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
-                <div className="w-full max-w-6xl h-screen flex flex-col justify-center py-6">
-                    {/* Header - Question Counter & Timer */}
-                    <div className="flex justify-between items-center text-2xl font-black text-gray-400 mb-4">
-                        <span>Q {question.questionIndex} / {question.totalQuestions}</span>
-                        <div className="flex items-center gap-2 text-purple-600 bg-purple-100 px-4 py-2 rounded-lg">
-                            <span>⏱</span> {question.timeLimit}s
+            <div className="min-h-screen bg-slate-900 flex flex-col p-6">
+                {/* Header */}
+                <div className="flex justify-between items-center mb-6">
+                    <div className="text-white">
+                        <span className="text-pink-500 font-mono text-2xl font-bold">{roomCode}</span>
+                    </div>
+                    <div className="text-white text-center">
+                        <span className="text-slate-400 text-sm uppercase tracking-wider">Responses</span>
+                    </div>
+                    <button onClick={onNext} className="bg-pink-600 hover:bg-pink-500 text-white px-6 py-3 rounded-xl font-bold shadow-lg transition-all">
+                        Next Question →
+                    </button>
+                </div>
+
+                {/* Question */}
+                <div className="bg-slate-800 rounded-2xl p-8 mb-6 border border-slate-700">
+                    <div className="flex justify-between items-center mb-4">
+                        <span className="text-slate-400 font-bold">Q {question.questionIndex} / {question.totalQuestions}</span>
+                    </div>
+                    <h2 className="text-4xl font-black text-white leading-tight">{question.question}</h2>
+                </div>
+
+                {/* Main Content: Responses Circle + Vote Bars */}
+                <div className="flex flex-1 gap-6">
+                    {/* Left: Circular Response Counter */}
+                    <div className="w-48 flex flex-col items-center justify-center">
+                        <div className="relative w-40 h-40">
+                            {/* Background circle */}
+                            <svg className="w-full h-full transform -rotate-90">
+                                <circle
+                                    cx="80"
+                                    cy="80"
+                                    r="70"
+                                    fill="none"
+                                    stroke="#334155"
+                                    strokeWidth="12"
+                                />
+                                {/* Progress circle */}
+                                <circle
+                                    cx="80"
+                                    cy="80"
+                                    r="70"
+                                    fill="none"
+                                    stroke="#ec4899"
+                                    strokeWidth="12"
+                                    strokeLinecap="round"
+                                    strokeDasharray={`${(liveVotes.answersReceived / Math.max(liveVotes.totalPlayers, 1)) * 440} 440`}
+                                    className="transition-all duration-300"
+                                />
+                            </svg>
+                            <div className="absolute inset-0 flex flex-col items-center justify-center text-white">
+                                <span className="text-5xl font-black">{liveVotes.answersReceived}</span>
+                                <span className="text-slate-400 text-sm">/ {liveVotes.totalPlayers}</span>
+                            </div>
                         </div>
+                        <span className="text-pink-400 font-bold mt-4 text-lg">Responses</span>
                     </div>
 
-                    {/* Question Box - Compact */}
-                    <div className="bg-white rounded-2xl shadow-2xl p-8 text-center mb-6 border-b-4 border-gray-200">
-                        <h2 className="text-4xl font-black text-slate-800 leading-tight">{question.question}</h2>
-                    </div>
-
-                    {/* Options Grid - Compact */}
-                    <div className="grid grid-cols-2 gap-4 mb-6">
-                        {question.options.map((opt, idx) => (
-                            <div key={idx} className={`${Colors[idx]} p-6 rounded-xl flex items-center shadow-lg`}>
-                                <div className="bg-black bg-opacity-20 w-12 h-12 rounded-full flex items-center justify-center text-white mr-4 font-bold text-xl flex-shrink-0">
-                                    {idx === 0 ? '▲' : idx === 1 ? '●' : idx === 2 ? '■' : '★'}
+                    {/* Right: Vote Distribution Bars */}
+                    <div className="flex-1 flex flex-col justify-center space-y-4">
+                        {liveVotes.voteData?.map((vote, idx) => (
+                            <div key={idx} className="flex items-center gap-4">
+                                {/* Option Label */}
+                                <div className="w-48 flex-shrink-0">
+                                    <span className="text-white font-bold text-lg truncate block">{vote.option}</span>
                                 </div>
-                                <span className="text-white text-2xl font-bold leading-tight">{opt}</span>
+
+                                {/* Bar */}
+                                <div className="flex-1 h-12 bg-slate-700 rounded-lg overflow-hidden relative">
+                                    <div
+                                        className="h-full rounded-lg transition-all duration-500 ease-out flex items-center justify-end pr-4"
+                                        style={{
+                                            width: `${Math.max((vote.count / maxVotes) * 100, vote.count > 0 ? 10 : 0)}%`,
+                                            backgroundColor: Colors[idx % Colors.length],
+                                            minWidth: vote.count > 0 ? '60px' : '0'
+                                        }}
+                                    >
+                                        {vote.count > 0 && (
+                                            <span className="text-white font-black text-lg drop-shadow">{vote.count}</span>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* Vote Count Badge */}
+                                <div
+                                    className="w-32 text-right px-4 py-2 rounded-full font-bold text-sm"
+                                    style={{
+                                        backgroundColor: vote.count > 0 ? Colors[idx % Colors.length] : '#475569',
+                                        color: 'white'
+                                    }}
+                                >
+                                    {vote.count} Answered
+                                </div>
                             </div>
                         ))}
                     </div>
+                </div>
 
-                    {/* Answers Stats - Now visible without scrolling */}
-                    <div className="flex justify-between items-center bg-slate-800 p-5 rounded-xl text-white shadow-lg">
-                        <div className="text-xl font-bold text-slate-300">Answers Received</div>
-                        <div className="flex items-center gap-3">
-                            <span className="text-4xl font-black text-green-400">{stats.answersReceived}</span>
-                            <span className="text-xl text-slate-400 font-bold">/ {stats.totalPlayers}</span>
-                        </div>
+                {/* Footer Stats */}
+                <div className="mt-6 bg-slate-800 p-4 rounded-xl border border-slate-700 flex justify-between items-center">
+                    <div className="text-slate-400">
+                        <span className="font-bold">Attempted by </span>
+                        <span className="text-pink-400 font-black">{liveVotes.answersReceived}/{liveVotes.totalPlayers}</span>
+                    </div>
+                    <div className="text-slate-400">
+                        <span className="font-bold">Unattempted: </span>
+                        <span className="text-white font-black">{liveVotes.totalPlayers - liveVotes.answersReceived}</span>
                     </div>
                 </div>
             </div>
         );
     }
 
-    if (status === 'RESULT') {
+    if (status === 'OVER') {
         return (
-            <div className="min-h-screen bg-indigo-900 flex flex-col items-center justify-center text-white p-4">
-                <h1 className="text-6xl font-black mb-12">Time's Up! 🛑</h1>
-                <button onClick={onShowLeaderboard} className="bg-white text-indigo-900 px-12 py-6 rounded-2xl text-3xl font-black shadow-2xl hover:bg-gray-100 transform transition hover:scale-105">
-                    Show Leaderboard 🏆
-                </button>
+            <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white p-6">
+                <div className="text-9xl mb-8">🎉</div>
+                <h1 className="text-5xl font-black mb-8">Poll Complete!</h1>
+                <div className="flex gap-4">
+                    <button onClick={onReset} className="bg-pink-600 hover:bg-pink-500 text-white px-10 py-4 rounded-xl text-xl font-black shadow-lg">
+                        New Poll 🔄
+                    </button>
+                    <button onClick={onClose} className="bg-red-600 hover:bg-red-500 text-white px-10 py-4 rounded-xl text-xl font-black shadow-lg">
+                        End Session ❌
+                    </button>
+                </div>
             </div>
         );
     }
 
-    if (status === 'LEADERBOARD' || status === 'OVER') {
-        return (
-            <div className="min-h-screen bg-purple-900 flex flex-col items-center p-6 text-white">
-                <h1 className="text-4xl font-black mb-8 mt-4 tracking-wide uppercase">{status === 'OVER' ? '🎉 FINAL SCORES' : '🏆 Top Players'}</h1>
-                <div className="w-full max-w-4xl flex-1 overflow-y-auto mb-6">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4">
-                        {leaderboard.map((player, idx) => (
-                            <div key={idx} className="bg-white text-purple-900 p-4 rounded-xl flex justify-between items-center shadow-lg">
-                                <div className="flex items-center gap-4">
-                                    <span className={`w-12 h-12 rounded-lg flex items-center justify-center font-black text-xl ${idx === 0 ? 'bg-yellow-400 text-white' : idx === 1 ? 'bg-gray-300 text-gray-700' : idx === 2 ? 'bg-orange-400 text-white' : 'bg-purple-100 text-purple-400'}`}>
-                                        {idx + 1}
-                                    </span>
-                                    <span className="font-bold text-xl tracking-tight">{player.name}</span>
-                                </div>
-                                <span className="font-black text-2xl">{player.score}</span>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-                <div className="flex gap-4 pb-4">
-                    {status !== 'OVER' ? (
-                        <button onClick={onNext} className="bg-green-500 hover:bg-green-400 px-10 py-4 rounded-xl text-xl font-black shadow-lg">Next Question ➡️</button>
-                    ) : (
-                        <>
-                            <button onClick={onReset} className="bg-white hover:bg-gray-100 text-purple-900 px-8 py-4 rounded-xl text-xl font-black shadow-lg">Restart Game 🔄</button>
-                            <button onClick={onClose} className="bg-red-500 hover:bg-red-400 text-white px-8 py-4 rounded-xl text-xl font-black shadow-lg">End Session ❌</button>
-                        </>
-                    )}
-                </div>
-            </div>
-        );
-    }
-    return <div>Loading...</div>;
+    return <div className="min-h-screen bg-slate-900 text-white flex items-center justify-center">Loading...</div>;
 }
 
-function PlayerGameView({ state, question, timer, onSubmit, result, myAnswer, playerName, leaderboard }) {
+function PlayerGameView({ state, question, onSubmit, myVote, playerName, sameOptionCount }) {
     if (state === 'WAITING') {
         return (
             <div className="min-h-screen bg-slate-800 flex flex-col items-center justify-center text-white p-6 text-center">
@@ -512,16 +538,13 @@ function PlayerGameView({ state, question, timer, onSubmit, result, myAnswer, pl
 
     if (state === 'ANSWERING') {
         return (
-            <div className="min-h-screen bg-gray-100 flex flex-col">
-                <div className="bg-white p-4 shadow-md border-b-4 border-gray-200">
+            <div className="min-h-screen bg-slate-900 flex flex-col">
+                <div className="bg-slate-800 p-4 shadow-md border-b border-slate-700">
                     <div className="flex justify-between items-center mb-2">
-                        <span className="font-bold text-gray-500">Q{question.questionIndex}</span>
-                        <div className={`px-4 py-1 rounded-full font-bold transition-all ${timer <= 5 ? 'bg-red-600 animate-pulse' : 'bg-purple-600'} text-white`}>
-                            {timer}s
-                        </div>
+                        <span className="font-bold text-slate-400">Q{question.questionIndex}</span>
+                        <span className="text-pink-400 font-bold">LIVE</span>
                     </div>
-                    {/* QUESTION TEXT FOR MOBILE */}
-                    <h3 className="text-xl font-bold text-gray-800 leading-tight">{question.questionText}</h3>
+                    <h3 className="text-xl font-bold text-white leading-tight">{question.questionText}</h3>
                 </div>
 
                 <div className="flex-1 p-4 grid gap-4 overflow-y-auto">
@@ -529,7 +552,7 @@ function PlayerGameView({ state, question, timer, onSubmit, result, myAnswer, pl
                         <button
                             key={idx}
                             onClick={() => onSubmit(idx)}
-                            className={`${Colors[idx]} rounded-2xl shadow-lg p-6 flex items-center active:scale-95 transition-all text-left group`}
+                            className={`${ColorsBg[idx % ColorsBg.length]} rounded-2xl shadow-lg p-6 flex items-center active:scale-95 transition-all text-left group`}
                         >
                             <div className="bg-black bg-opacity-20 w-12 h-12 rounded-full flex items-center justify-center text-white mr-4 font-bold text-xl flex-shrink-0 group-active:scale-110 transition-transform">
                                 {idx === 0 ? '▲' : idx === 1 ? '●' : idx === 2 ? '■' : '★'}
@@ -544,73 +567,33 @@ function PlayerGameView({ state, question, timer, onSubmit, result, myAnswer, pl
 
     if (state === 'SUBMITTED') {
         return (
-            <div className="min-h-screen bg-indigo-600 flex flex-col items-center justify-center text-white p-6 text-center">
-                <div className="animate-pulse text-8xl mb-6">🚀</div>
-                <h2 className="text-4xl font-black">Answer Locked!</h2>
-                <p className="text-indigo-200 mt-4 text-xl">Good luck!</p>
-            </div>
-        );
-    }
-
-    if (state === 'RESULT') {
-        const isCorrect = result.correctAnswer === myAnswer;
-        return (
-            <div className={`min-h-screen flex flex-col items-center justify-center text-white p-6 text-center ${isCorrect ? 'bg-green-500' : 'bg-red-500'}`}>
-                <div className="text-9xl mb-8 filter drop-shadow-lg">{isCorrect ? '😎' : '😵'}</div>
-                <h2 className="text-6xl font-black mb-4">{isCorrect ? 'NAILED IT!' : 'NOPE!'}</h2>
-                <p className="text-2xl font-bold opacity-80">{isCorrect ? "+ Points earned" : "Better luck next time"}</p>
+            <div className="min-h-screen bg-gradient-to-b from-pink-600 to-purple-700 flex flex-col items-center justify-center text-white p-6 text-center">
+                <div className="text-8xl mb-6">✅</div>
+                <h2 className="text-4xl font-black mb-4">Vote Submitted!</h2>
+                {sameOptionCount > 0 ? (
+                    <div className="bg-white bg-opacity-20 px-8 py-4 rounded-2xl mt-4">
+                        <p className="text-2xl font-bold">
+                            <span className="text-5xl font-black text-yellow-300">{sameOptionCount}</span>
+                            <span className="block mt-2">other{sameOptionCount > 1 ? 's' : ''} responded with the same option</span>
+                        </p>
+                    </div>
+                ) : (
+                    <p className="text-xl text-purple-200 mt-4">You're the first to choose this option!</p>
+                )}
+                <p className="text-purple-200 mt-8 text-lg">Watch the big screen for results...</p>
             </div>
         );
     }
 
     if (state === 'OVER') {
-        const myRank = parseInt(sessionStorage.getItem('playerRank')) || null;
-        const myScore = parseInt(sessionStorage.getItem('playerScore')) || 0;
-        const totalPlayers = parseInt(sessionStorage.getItem('totalPlayers')) || 0;
-
         return (
-            <div className="min-h-screen bg-purple-900 flex flex-col items-center p-6 text-white">
-                {myRank && (
-                    <div className="w-full max-w-md mb-6 mt-4">
-                        <div className="bg-gradient-to-r from-purple-600 to-indigo-600 p-6 rounded-2xl shadow-2xl border-4 border-yellow-400">
-                            <div className="text-center mb-2">
-                                <span className="text-yellow-300 text-sm font-bold uppercase tracking-widest">Your Rank</span>
-                            </div>
-                            <div className="flex justify-between items-center">
-                                <div className="text-center flex-1">
-                                    <div className="text-6xl font-black text-white">#{myRank}</div>
-                                    <div className="text-purple-200 text-sm">of {totalPlayers}</div>
-                                </div>
-                                <div className="h-16 w-px bg-purple-400"></div>
-                                <div className="text-center flex-1">
-                                    <div className="text-4xl font-black text-yellow-300">{myScore}</div>
-                                    <div className="text-purple-200 text-sm">Points</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                <h1 className="text-3xl font-black mb-6 uppercase">🏆 Top Players</h1>
-                <div className="w-full max-w-md space-y-3">
-                    {leaderboard && leaderboard.map((player, idx) => (
-                        <div key={idx} className="bg-white text-purple-900 p-4 rounded-xl flex justify-between items-center shadow-lg">
-                            <div className="flex items-center gap-4">
-                                <span className={`w-10 h-10 rounded-lg flex items-center justify-center font-black text-xl ${idx === 0 ? 'bg-yellow-400 text-white' : idx === 1 ? 'bg-gray-300 text-gray-700' : idx === 2 ? 'bg-orange-400 text-white' : 'bg-purple-100 text-purple-400'}`}>
-                                    {idx + 1}
-                                </span>
-                                <span className="font-bold text-xl">{player.name}</span>
-                            </div>
-                            <span className="font-black text-2xl">{player.score}</span>
-                        </div>
-                    ))}
-                </div>
-                <div className="mt-8 text-center text-purple-200">
-                    Host will restart soon...
-                </div>
+            <div className="min-h-screen bg-gradient-to-b from-purple-700 to-slate-900 flex flex-col items-center justify-center text-white p-6 text-center">
+                <div className="text-8xl mb-6">🎉</div>
+                <h2 className="text-5xl font-black mb-4">Thanks for participating!</h2>
+                <p className="text-xl text-purple-200">Poll has ended</p>
             </div>
         );
     }
 
-    return <div>Loading...</div>;
+    return <div className="min-h-screen bg-slate-900 text-white flex items-center justify-center">Loading...</div>;
 }
